@@ -252,6 +252,11 @@ func (p *Plugin) Reset() error {
 	defer p.mu.Unlock()
 
 	const op = errors.Op("smtp_reset")
+
+	if p.wPool == nil {
+		return errors.E(op, errors.Str("worker pool not initialized"))
+	}
+
 	p.log.Info("reset signal received")
 
 	err := p.wPool.Reset(context.Background())
@@ -266,8 +271,17 @@ func (p *Plugin) Reset() error {
 // Workers returns current worker states
 func (p *Plugin) Workers() []*process.State {
 	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	// Check if worker pool is initialized
+	if p.wPool == nil {
+		return nil
+	}
+
 	wrk := p.wPool.Workers()
-	p.mu.RUnlock()
+	if wrk == nil {
+		return nil
+	}
 
 	ps := make([]*process.State, len(wrk))
 
@@ -297,6 +311,10 @@ func (p *Plugin) RPC() any {
 func (p *Plugin) Exec(pld *payload.Payload) (*payload.Payload, error) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
+
+	if p.wPool == nil {
+		return nil, errors.Str("worker pool not initialized")
+	}
 
 	result, err := p.wPool.Exec(context.Background(), pld, nil)
 	if err != nil {
