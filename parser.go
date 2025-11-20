@@ -200,9 +200,13 @@ func (s *Session) processAttachmentParsed(part *multipart.Part, parsed *ParsedMe
 	}
 
 	attachment := Attachment{
-		Filename:  filename,
-		Type:      contentType,
-		ContentID: contentID,
+		Filename: filename,
+		Type:     contentType,
+	}
+
+	// Set ContentID if present
+	if contentID != "" {
+		attachment.ContentID = &contentID
 	}
 
 	// Handle based on storage mode

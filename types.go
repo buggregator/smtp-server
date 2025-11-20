@@ -53,10 +53,10 @@ type EmailAddress struct {
 
 // Attachment represents an email attachment for PHP
 type Attachment struct {
-	Filename  string `json:"filename"`
-	Content   string `json:"content"`
-	Type      string `json:"type"`
-	ContentID string `json:"contentId,omitempty"`
+	Filename  string  `json:"filename"`
+	Content   string  `json:"content"`
+	Type      string  `json:"type"`
+	ContentID *string `json:"contentId"`
 }
 
 // ParsedMessage represents the structure expected by PHP Parser
