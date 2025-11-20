@@ -2,8 +2,10 @@ package smtp
 
 import (
 	"context"
+	"net"
 	"sync"
 
+	"github.com/emersion/go-smtp"
 	"github.com/roadrunner-server/errors"
 	"github.com/roadrunner-server/pool/payload"
 	"github.com/roadrunner-server/pool/pool"
@@ -60,8 +62,12 @@ type Plugin struct {
 	server Server
 
 	wPool       Pool
-	connections sync.Map // uuid -> conn
+	connections sync.Map // uuid -> *Session
 	pldPool     sync.Pool
+
+	// SMTP server components
+	smtpServer *smtp.Server
+	listener   net.Listener
 }
 
 // Init initializes the plugin with configuration and logger
@@ -110,7 +116,7 @@ func (p *Plugin) Serve() chan error {
 
 	p.mu.Lock()
 
-	// Create worker pool
+	// 1. Create worker pool
 	var err error
 	p.wPool, err = p.server.NewPool(context.Background(), p.cfg.Pool, map[string]string{RrMode: PluginName}, nil)
 	if err != nil {
@@ -121,19 +127,54 @@ func (p *Plugin) Serve() chan error {
 
 	p.log.Info("SMTP plugin worker pool created",
 		zap.Int("num_workers", len(p.wPool.Workers())),
-		zap.String("addr", p.cfg.Addr),
 	)
+
+	// 2. Create SMTP backend
+	backend := NewBackend(p)
+
+	// 3. Create SMTP server
+	p.smtpServer = smtp.NewServer(backend)
+
+	// Configure server from config
+	p.smtpServer.Addr = p.cfg.Addr
+	p.smtpServer.Domain = p.cfg.Hostname
+	p.smtpServer.ReadTimeout = p.cfg.ReadTimeout
+	p.smtpServer.WriteTimeout = p.cfg.WriteTimeout
+	p.smtpServer.MaxMessageBytes = p.cfg.MaxMessageSize
+	p.smtpServer.MaxRecipients = 100
+	p.smtpServer.AllowInsecureAuth = true
+
+	p.log.Info("SMTP server configured",
+		zap.String("addr", p.smtpServer.Addr),
+		zap.String("domain", p.smtpServer.Domain),
+	)
+
+	// 4. Create listener
+	p.listener, err = net.Listen("tcp", p.cfg.Addr)
+	if err != nil {
+		p.mu.Unlock()
+		errCh <- errors.E(errors.Op("smtp_listen"), err)
+		return errCh
+	}
 
 	p.mu.Unlock()
 
-	// TODO: Start SMTP server listener in Step 3
+	// 5. Start SMTP server in goroutine
+	go func() {
+		p.log.Info("SMTP server starting", zap.String("addr", p.cfg.Addr))
+
+		if err := p.smtpServer.Serve(p.listener); err != nil {
+			p.log.Error("SMTP server error", zap.Error(err))
+			errCh <- err
+		}
+	}()
 
 	return errCh
 }
 
 // Stop gracefully stops the plugin
 func (p *Plugin) Stop(ctx context.Context) error {
-	p.log.Info("SMTP server stopping")
+	p.log.Info("stopping SMTP plugin")
 
 	doneCh := make(chan struct{}, 1)
 
@@ -141,13 +182,23 @@ func (p *Plugin) Stop(ctx context.Context) error {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 
-		// Close all connections
-		p.connections.Range(func(_, value any) bool {
-			// TODO: Close connection in next step
+		// 1. Close listener (stops accepting new connections)
+		if p.listener != nil {
+			_ = p.listener.Close()
+		}
+
+		// 2. Close SMTP server
+		if p.smtpServer != nil {
+			_ = p.smtpServer.Close()
+		}
+
+		// 3. Close all tracked connections
+		p.connections.Range(func(key, value any) bool {
+			// Sessions will be cleaned up by Logout()
 			return true
 		})
 
-		// Destroy worker pool
+		// 4. Destroy worker pool
 		if p.wPool != nil {
 			switch pp := p.wPool.(type) {
 			case *staticPool.Pool:
@@ -164,6 +215,7 @@ func (p *Plugin) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-doneCh:
+		p.log.Info("SMTP plugin stopped")
 		return nil
 	}
 }
