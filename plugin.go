@@ -115,7 +115,7 @@ func (p *Plugin) Serve() chan error {
 	errCh := make(chan error, 1)
 
 	var err error
-	p.wPool, err = p.server.NewPool(context.Background(), p.cfg.Pool, map[string]string{RrMode: pluginName}, nil)
+	p.wPool, err = p.server.NewPool(context.Background(), p.cfg.Pool, map[string]string{RrMode: PluginName}, nil)
 	if err != nil {
 		errCh <- err
 		return errCh
