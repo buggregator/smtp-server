@@ -229,12 +229,12 @@ func (p *Plugin) Reset() error {
 
 	p.log.Info("reset signal was received")
 
-	if p.pool == nil {
+	if p.wPool == nil {
 		p.log.Info("pool is nil, nothing to reset")
 		return nil
 	}
 
-	err := p.pool.Reset(context.Background())
+	err := p.wPool.Reset(context.Background())
 	if err != nil {
 		return errors.E(op, err)
 	}
@@ -248,11 +248,11 @@ func (p *Plugin) Workers() []*process.State {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
-	if p.pool == nil {
+	if p.wPool == nil {
 		return nil
 	}
 
-	workers := p.pool.Workers()
+	workers := p.wPool.Workers()
 
 	ps := make([]*process.State, 0, len(workers))
 	for i := range workers {
