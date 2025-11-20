@@ -5,7 +5,6 @@ import (
 	"net"
 	"sync"
 
-	"github.com/emersion/go-smtp"
 	"github.com/roadrunner-server/errors"
 	"github.com/roadrunner-server/pool/payload"
 	"github.com/roadrunner-server/pool/pool"
@@ -114,9 +113,44 @@ func (p *Plugin) Init(log Logger, cfg Configurer, server Server) error {
 func (p *Plugin) Serve() chan error {
 	errCh := make(chan error, 1)
 
-	// 1. Create worker pool (same pattern as TCP plugin)
+	// 1. СНАЧАЛА создаём и настраиваем SMTP server (но не запускаем)
+	backend := NewBackend(p)
+
+	p.smtpServer = smtp.NewServer(backend)
+	p.smtpServer.Addr = p.cfg.Addr
+	p.smtpServer.Domain = p.cfg.Hostname
+	p.smtpServer.ReadTimeout = p.cfg.ReadTimeout
+	p.smtpServer.WriteTimeout = p.cfg.WriteTimeout
+	p.smtpServer.MaxMessageBytes = p.cfg.MaxMessageSize
+	p.smtpServer.MaxRecipients = 100
+	p.smtpServer.AllowInsecureAuth = true
+
+	// 2. Создаём listener
 	var err error
-	p.server.NewPool(context.Background(), p.cfg.Pool, map[string]string{RrMode: PluginName}, p.log)
+	p.listener, err = net.Listen("tcp", p.cfg.Addr)
+	if err != nil {
+		errCh <- errors.E(errors.Op("smtp_listen"), err)
+		return errCh
+	}
+
+	p.log.Info("SMTP listener created", zap.String("addr", p.cfg.Addr))
+
+	// 3. ЗАПУСКАЕМ SMTP server в горутине
+	go func() {
+		p.log.Info("SMTP server starting", zap.String("addr", p.cfg.Addr))
+		if err := p.smtpServer.Serve(p.listener); err != nil {
+			p.log.Error("SMTP server error", zap.Error(err))
+			errCh <- err
+		}
+	}()
+
+	// 4. ТЕПЕРЬ создаём worker pool (workers будут ждать входящих соединений)
+	p.wPool, err = p.server.NewPool(
+		context.Background(),
+		p.cfg.Pool,
+		map[string]string{RrMode: PluginName},
+		p.log, // ⚠️ И не забудьте logger!
+	)
 	if err != nil {
 		errCh <- err
 		return errCh
@@ -126,49 +160,7 @@ func (p *Plugin) Serve() chan error {
 		zap.Int("num_workers", len(p.wPool.Workers())),
 	)
 
-	p.mu.Lock()
-
-	// 2. Create SMTP backend
-	backend := NewBackend(p)
-
-	// 3. Create SMTP server
-	p.smtpServer = smtp.NewServer(backend)
-
-	// Configure server from config
-	p.smtpServer.Addr = p.cfg.Addr
-	p.smtpServer.Domain = p.cfg.Hostname
-	p.smtpServer.ReadTimeout = p.cfg.ReadTimeout
-	p.smtpServer.WriteTimeout = p.cfg.WriteTimeout
-	p.smtpServer.MaxMessageBytes = p.cfg.MaxMessageSize
-	p.smtpServer.MaxRecipients = 100
-	p.smtpServer.AllowInsecureAuth = true
-
-	p.log.Info("SMTP server configured",
-		zap.String("addr", p.smtpServer.Addr),
-		zap.String("domain", p.smtpServer.Domain),
-	)
-
-	// 4. Create listener
-	p.listener, err = net.Listen("tcp", p.cfg.Addr)
-	if err != nil {
-		p.mu.Unlock()
-		errCh <- errors.E(errors.Op("smtp_listen"), err)
-		return errCh
-	}
-
-	p.mu.Unlock()
-
-	// 5. Start SMTP server in goroutine
-	go func() {
-		p.log.Info("SMTP server starting", zap.String("addr", p.cfg.Addr))
-
-		if err := p.smtpServer.Serve(p.listener); err != nil {
-			p.log.Error("SMTP server error", zap.Error(err))
-			errCh <- err
-		}
-	}()
-
-	// 6. Start temp file cleanup routine
+	// 5. Запускаем cleanup routine
 	p.startCleanupRoutine(context.Background())
 
 	return errCh
