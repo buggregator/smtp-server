@@ -108,17 +108,25 @@ func (p *Plugin) Init(log Logger, cfg Configurer, server Server) error {
 func (p *Plugin) Serve() chan error {
 	errCh := make(chan error, 1)
 
+	p.mu.Lock()
+
 	// Create worker pool
 	var err error
 	p.wPool, err = p.server.NewPool(context.Background(), p.cfg.Pool, map[string]string{RrMode: PluginName}, nil)
 	if err != nil {
+		p.mu.Unlock()
 		errCh <- err
 		return errCh
 	}
 
-	p.log.Info("SMTP server starting", zap.String("addr", p.cfg.Addr))
+	p.log.Info("SMTP plugin worker pool created",
+		zap.Int("num_workers", len(p.wPool.Workers())),
+		zap.String("addr", p.cfg.Addr),
+	)
 
-	// TODO: Start SMTP server listener in next step
+	p.mu.Unlock()
+
+	// TODO: Start SMTP server listener in Step 3
 
 	return errCh
 }
@@ -166,30 +174,39 @@ func (p *Plugin) Reset() error {
 	defer p.mu.Unlock()
 
 	const op = errors.Op("smtp_reset")
-	p.log.Info("reset signal was received")
+
+	if p.wPool == nil {
+		return nil
+	}
+
+	p.log.Info("resetting SMTP plugin workers")
 
 	err := p.wPool.Reset(context.Background())
 	if err != nil {
 		return errors.E(op, err)
 	}
 
-	p.log.Info("plugin was successfully reset")
+	p.log.Info("SMTP plugin workers reset completed")
 	return nil
 }
 
 // Workers returns the state of all workers
 func (p *Plugin) Workers() []*process.State {
 	p.mu.RLock()
-	wrk := p.wPool.Workers()
-	p.mu.RUnlock()
+	defer p.mu.RUnlock()
 
+	if p.wPool == nil {
+		return nil
+	}
+
+	wrk := p.wPool.Workers()
 	ps := make([]*process.State, len(wrk))
 
 	for i := range wrk {
 		st, err := process.WorkerProcessState(wrk[i])
 		if err != nil {
-			p.log.Error("smtp workers state", zap.Error(err))
-			return nil
+			p.log.Error("failed to get worker state", zap.Error(err))
+			continue
 		}
 		ps[i] = st
 	}
@@ -209,7 +226,26 @@ func (p *Plugin) RPC() any {
 	}
 }
 
-// rpc is a placeholder for RPC methods
-type rpc struct {
-	p *Plugin
+// AddWorker adds a new worker to the pool
+func (p *Plugin) AddWorker() error {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if p.wPool == nil {
+		return errors.Str("worker pool not initialized")
+	}
+
+	return p.wPool.AddWorker()
+}
+
+// RemoveWorker removes a worker from the pool
+func (p *Plugin) RemoveWorker(ctx context.Context) error {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	if p.wPool == nil {
+		return errors.Str("worker pool not initialized")
+	}
+
+	return p.wPool.RemoveWorker(ctx)
 }
