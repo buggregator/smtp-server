@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/emersion/go-smtp"
 	"github.com/roadrunner-server/errors"
@@ -107,6 +108,7 @@ func (p *Plugin) Init(log Logger, cfg Configurer, server Server) error {
 		zap.Int64("max_message_size", p.cfg.MaxMessageSize),
 	)
 
+	p.log.Debug("SMTP Init() returning nil, waiting for Serve() to be called")
 	return nil
 }
 
@@ -114,24 +116,46 @@ func (p *Plugin) Init(log Logger, cfg Configurer, server Server) error {
 func (p *Plugin) Serve() chan error {
 	errCh := make(chan error, 2)
 
-	p.mu.Lock()
+	p.log.Debug("SMTP Serve() called, attempting to acquire mutex")
+
+	// Debug: try to detect mutex contention
+	acquired := make(chan struct{})
+	go func() {
+		p.mu.Lock()
+		close(acquired)
+	}()
+
+	select {
+	case <-acquired:
+		p.log.Debug("SMTP Serve() mutex acquired")
+	case <-time.After(5 * time.Second):
+		p.log.Error("SMTP Serve() BLOCKED waiting for mutex for 5s - possible deadlock")
+		<-acquired // still wait for it
+		p.log.Debug("SMTP Serve() mutex finally acquired after timeout warning")
+	}
 	defer p.mu.Unlock()
 
+	p.log.Debug("SMTP creating worker pool", zap.Any("pool_config", p.cfg.Pool))
 	var err error
 	p.wPool, err = p.server.NewPool(context.Background(), p.cfg.Pool, map[string]string{RrMode: PluginName}, p.log)
 	if err != nil {
+		p.log.Error("SMTP failed to create worker pool", zap.Error(err))
 		errCh <- err
 		return errCh
 	}
+	p.log.Debug("SMTP worker pool created successfully")
 
 	p.log.Info("SMTP plugin worker pool created",
 		zap.Int("num_workers", len(p.wPool.Workers())),
 	)
 
 	// 2. Create SMTP backend
+	p.log.Debug("SMTP creating backend")
 	backend := NewBackend(p)
+	p.log.Debug("SMTP backend created")
 
 	// 3. Create SMTP server
+	p.log.Debug("SMTP creating server")
 	p.smtpServer = smtp.NewServer(backend)
 	p.smtpServer.Addr = p.cfg.Addr
 	p.smtpServer.Domain = p.cfg.Hostname
@@ -147,8 +171,10 @@ func (p *Plugin) Serve() chan error {
 	)
 
 	// 4. Create listener
+	p.log.Debug("SMTP creating listener", zap.String("addr", p.cfg.Addr))
 	p.listener, err = net.Listen("tcp", p.cfg.Addr)
 	if err != nil {
+		p.log.Error("SMTP failed to create listener", zap.Error(err))
 		errCh <- errors.E(errors.Op("smtp_listen"), err)
 		return errCh
 	}
@@ -156,6 +182,7 @@ func (p *Plugin) Serve() chan error {
 	p.log.Info("SMTP listener created", zap.String("addr", p.cfg.Addr))
 
 	// 5. Start SMTP server in goroutine
+	p.log.Debug("SMTP starting server goroutine")
 	go func() {
 		p.log.Info("SMTP server starting", zap.String("addr", p.cfg.Addr))
 		if err := p.smtpServer.Serve(p.listener); err != nil {
@@ -165,8 +192,10 @@ func (p *Plugin) Serve() chan error {
 	}()
 
 	// 6. Start temp file cleanup routine
+	p.log.Debug("SMTP starting cleanup routine")
 	p.startCleanupRoutine(context.Background())
 
+	p.log.Debug("SMTP Serve() completed, returning error channel")
 	return errCh
 }
 
