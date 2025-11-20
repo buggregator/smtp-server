@@ -44,3 +44,32 @@ type AttachmentData struct {
 	Content     string `json:"content,omitempty"` // Base64 (memory mode)
 	Path        string `json:"path,omitempty"`    // File path (tempfile mode)
 }
+
+// EmailAddress represents an email address with name
+type EmailAddress struct {
+	Email string `json:"email"`
+	Name  string `json:"name"`
+}
+
+// Attachment represents an email attachment for PHP
+type Attachment struct {
+	Filename  string `json:"filename"`
+	Content   string `json:"content"`
+	Type      string `json:"type"`
+	ContentID string `json:"contentId,omitempty"`
+}
+
+// ParsedMessage represents the structure expected by PHP Parser
+type ParsedMessage struct {
+	ID            *string        `json:"id"`
+	Raw           string         `json:"raw"`
+	Sender        []EmailAddress `json:"sender"`
+	Recipients    []EmailAddress `json:"recipients"`
+	CCs           []EmailAddress `json:"ccs"`
+	Subject       string         `json:"subject"`
+	HTMLBody      string         `json:"htmlBody"`
+	TextBody      string         `json:"textBody"`
+	ReplyTo       []EmailAddress `json:"replyTo"`
+	AllRecipients []string       `json:"allRecipients"`
+	Attachments   []Attachment   `json:"attachments"`
+}

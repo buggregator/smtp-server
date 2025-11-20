@@ -11,9 +11,9 @@ import (
 )
 
 // sendToWorker sends email data to PHP worker and waits for response
-func (s *Session) sendToWorker(emailData *EmailData) (string, error) {
+func (s *Session) sendToWorker(message *ParsedMessage) (string, error) {
 	// 1. Marshal email data to JSON
-	jsonData, err := json.Marshal(emailData)
+	jsonData, err := json.Marshal(message)
 	if err != nil {
 		return "", errors.E(errors.Op("smtp_marshal_email"), err)
 	}

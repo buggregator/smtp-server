@@ -11,13 +11,12 @@ import (
 	"net/mail"
 	"os"
 	"strings"
-	"time"
 
 	"go.uber.org/zap"
 )
 
-// parseEmail parses raw email data into structured format
-func (s *Session) parseEmail(rawData []byte) (*EmailData, error) {
+// parseEmail parses raw email data into structured format for PHP
+func (s *Session) parseEmail(rawData []byte) (*ParsedMessage, error) {
 	// 1. Parse as mail.Message (stdlib)
 	msg, err := mail.ReadMessage(bytes.NewReader(rawData))
 	if err != nil {
@@ -25,36 +24,65 @@ func (s *Session) parseEmail(rawData []byte) (*EmailData, error) {
 		return nil, err
 	}
 
-	emailData := &EmailData{
-		Event:      "EMAIL_RECEIVED",
-		UUID:       s.uuid,
-		RemoteAddr: s.remoteAddr,
-		ReceivedAt: time.Now(),
-		Envelope: EnvelopeData{
-			From: s.from,
-			To:   s.to,
-			Helo: s.heloName,
-		},
-		Attachments: make([]AttachmentData, 0),
+	parsed := &ParsedMessage{
+		Raw:           string(rawData),
+		Sender:        make([]EmailAddress, 0),
+		Recipients:    make([]EmailAddress, 0),
+		CCs:           make([]EmailAddress, 0),
+		ReplyTo:       make([]EmailAddress, 0),
+		AllRecipients: s.to, // Envelope recipients
+		Attachments:   make([]Attachment, 0),
 	}
 
-	// 2. Add authentication data if present
-	if s.authenticated {
-		emailData.Auth = &AuthData{
-			Attempted: true,
-			Mechanism: s.authMechanism,
-			Username:  s.authUsername,
-			Password:  s.authPassword,
+	// 2. Parse Message-ID
+	if msgID := msg.Header.Get("Message-ID"); msgID != "" {
+		parsed.ID = &msgID
+	}
+
+	// 3. Parse From (sender)
+	if fromAddrs, err := msg.Header.AddressList("From"); err == nil {
+		for _, addr := range fromAddrs {
+			parsed.Sender = append(parsed.Sender, EmailAddress{
+				Email: addr.Address,
+				Name:  addr.Name,
+			})
 		}
 	}
 
-	// 3. Parse headers
-	emailData.Message.Headers = make(map[string][]string)
-	for key, values := range msg.Header {
-		emailData.Message.Headers[key] = values
+	// 4. Parse To (recipients)
+	if toAddrs, err := msg.Header.AddressList("To"); err == nil {
+		for _, addr := range toAddrs {
+			parsed.Recipients = append(parsed.Recipients, EmailAddress{
+				Email: addr.Address,
+				Name:  addr.Name,
+			})
+		}
 	}
 
-	// 4. Parse body and attachments
+	// 5. Parse CC
+	if ccAddrs, err := msg.Header.AddressList("Cc"); err == nil {
+		for _, addr := range ccAddrs {
+			parsed.CCs = append(parsed.CCs, EmailAddress{
+				Email: addr.Address,
+				Name:  addr.Name,
+			})
+		}
+	}
+
+	// 6. Parse Reply-To
+	if replyAddrs, err := msg.Header.AddressList("Reply-To"); err == nil {
+		for _, addr := range replyAddrs {
+			parsed.ReplyTo = append(parsed.ReplyTo, EmailAddress{
+				Email: addr.Address,
+				Name:  addr.Name,
+			})
+		}
+	}
+
+	// 7. Parse Subject
+	parsed.Subject = msg.Header.Get("Subject")
+
+	// 8. Parse body and attachments
 	contentType := msg.Header.Get("Content-Type")
 	if contentType == "" {
 		contentType = "text/plain"
@@ -64,9 +92,14 @@ func (s *Session) parseEmail(rawData []byte) (*EmailData, error) {
 	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
 		// Simple email (no attachments)
 		body, _ := io.ReadAll(msg.Body)
-		emailData.Message.Body = string(body)
+		decoded := s.decodeContent(body, msg.Header.Get("Content-Transfer-Encoding"))
+		if strings.HasPrefix(mediaType, "text/html") {
+			parsed.HTMLBody = string(decoded)
+		} else {
+			parsed.TextBody = string(decoded)
+		}
 	} else {
-		// 5. Parse multipart message
+		// 9. Parse multipart message
 		boundary := params["boundary"]
 		mr := multipart.NewReader(msg.Body, boundary)
 
@@ -80,34 +113,30 @@ func (s *Session) parseEmail(rawData []byte) (*EmailData, error) {
 				continue
 			}
 
-			if err := s.processPart(part, emailData); err != nil {
+			if err := s.processPartParsed(part, parsed); err != nil {
 				s.log.Error("process part error", zap.Error(err))
 			}
 		}
 	}
 
-	// 6. Include raw message if configured
-	if s.backend.plugin.cfg.IncludeRaw {
-		emailData.Message.Raw = string(rawData)
-	}
-
-	return emailData, nil
+	return parsed, nil
 }
 
-// processPart handles individual MIME parts
-func (s *Session) processPart(part *multipart.Part, emailData *EmailData) error {
+// processPartParsed handles individual MIME parts for ParsedMessage
+func (s *Session) processPartParsed(part *multipart.Part, parsed *ParsedMessage) error {
 	disposition := part.Header.Get("Content-Disposition")
 	contentType := part.Header.Get("Content-Type")
 
 	// Check if this is an attachment
 	if strings.HasPrefix(disposition, "attachment") ||
 		strings.HasPrefix(disposition, "inline") {
-		return s.processAttachment(part, emailData)
+		return s.processAttachmentParsed(part, parsed)
 	}
 
 	// This is body content
-	if strings.HasPrefix(contentType, "text/plain") ||
-		strings.HasPrefix(contentType, "text/html") ||
+	mediaType, _, _ := mime.ParseMediaType(contentType)
+	if strings.HasPrefix(mediaType, "text/plain") ||
+		strings.HasPrefix(mediaType, "text/html") ||
 		contentType == "" {
 		bodyBytes, err := io.ReadAll(part)
 		if err != nil {
@@ -117,19 +146,26 @@ func (s *Session) processPart(part *multipart.Part, emailData *EmailData) error 
 		// Decode if needed (quoted-printable, base64)
 		decoded := s.decodeContent(bodyBytes, part.Header.Get("Content-Transfer-Encoding"))
 
-		if emailData.Message.Body == "" {
-			emailData.Message.Body = string(decoded)
+		if strings.HasPrefix(mediaType, "text/html") {
+			if parsed.HTMLBody == "" {
+				parsed.HTMLBody = string(decoded)
+			} else {
+				parsed.HTMLBody += string(decoded)
+			}
 		} else {
-			// Append if multiple text parts
-			emailData.Message.Body += "\n\n" + string(decoded)
+			if parsed.TextBody == "" {
+				parsed.TextBody = string(decoded)
+			} else {
+				parsed.TextBody += "\n\n" + string(decoded)
+			}
 		}
 	}
 
 	return nil
 }
 
-// processAttachment extracts attachment data
-func (s *Session) processAttachment(part *multipart.Part, emailData *EmailData) error {
+// processAttachmentParsed extracts attachment data for ParsedMessage
+func (s *Session) processAttachmentParsed(part *multipart.Part, parsed *ParsedMessage) error {
 	filename := part.FileName()
 	if filename == "" {
 		filename = "unnamed"
@@ -143,6 +179,10 @@ func (s *Session) processAttachment(part *multipart.Part, emailData *EmailData) 
 	if idx := strings.Index(contentType, ";"); idx > 0 {
 		contentType = strings.TrimSpace(contentType[:idx])
 	}
+
+	contentID := part.Header.Get("Content-ID")
+	// Clean up Content-ID (remove angle brackets)
+	contentID = strings.Trim(contentID, "<>")
 
 	// Read attachment content
 	content, err := io.ReadAll(part)
@@ -159,10 +199,10 @@ func (s *Session) processAttachment(part *multipart.Part, emailData *EmailData) 
 		}
 	}
 
-	attachment := AttachmentData{
-		Filename:    filename,
-		ContentType: contentType,
-		Size:        int64(len(content)),
+	attachment := Attachment{
+		Filename:  filename,
+		Type:      contentType,
+		ContentID: contentID,
 	}
 
 	// Handle based on storage mode
@@ -171,15 +211,15 @@ func (s *Session) processAttachment(part *multipart.Part, emailData *EmailData) 
 		// Base64 encode for JSON
 		attachment.Content = base64.StdEncoding.EncodeToString(content)
 	} else {
-		// Write to temp file
+		// Write to temp file and store path in Content field
 		path, err := s.saveTempFile(content, filename)
 		if err != nil {
 			return err
 		}
-		attachment.Path = path
+		attachment.Content = path
 	}
 
-	emailData.Attachments = append(emailData.Attachments, attachment)
+	parsed.Attachments = append(parsed.Attachments, attachment)
 	return nil
 }
 
