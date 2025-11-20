@@ -136,7 +136,6 @@ func (p *Plugin) Serve() chan error {
 
 	p.log.Info("SMTP listener created", zap.String("addr", p.cfg.Addr))
 
-	// 3. ЗАПУСКАЕМ SMTP server в горутине
 	go func() {
 		p.log.Info("SMTP server starting", zap.String("addr", p.cfg.Addr))
 		if err := p.smtpServer.Serve(p.listener); err != nil {
@@ -145,12 +144,11 @@ func (p *Plugin) Serve() chan error {
 		}
 	}()
 
-	// 4. ТЕПЕРЬ создаём worker pool (workers будут ждать входящих соединений)
 	p.wPool, err = p.server.NewPool(
 		context.Background(),
 		p.cfg.Pool,
 		map[string]string{RrMode: PluginName},
-		p.log, // ⚠️ И не забудьте logger!
+		p.log,
 	)
 	if err != nil {
 		errCh <- err
@@ -161,7 +159,6 @@ func (p *Plugin) Serve() chan error {
 		zap.Int("num_workers", len(p.wPool.Workers())),
 	)
 
-	// 5. Запускаем cleanup routine
 	p.startCleanupRoutine(context.Background())
 
 	return errCh
@@ -193,13 +190,14 @@ func (p *Plugin) Stop(ctx context.Context) error {
 			return true
 		})
 
-		// 4. Destroy worker pool
 		if p.wPool != nil {
 			switch pp := p.wPool.(type) {
 			case *staticPool.Pool:
 				if pp != nil {
 					pp.Destroy(ctx)
 				}
+			default:
+				// pool is nil, nothing to do
 			}
 		}
 
@@ -237,24 +235,20 @@ func (p *Plugin) Reset() error {
 	return nil
 }
 
-// Workers returns the state of all workers
 func (p *Plugin) Workers() []*process.State {
 	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	if p.wPool == nil {
-		return nil
-	}
-
 	wrk := p.wPool.Workers()
+	p.mu.RUnlock()
+
 	ps := make([]*process.State, len(wrk))
 
 	for i := range wrk {
 		st, err := process.WorkerProcessState(wrk[i])
 		if err != nil {
-			p.log.Error("failed to get worker state", zap.Error(err))
-			continue
+			p.log.Error("jobs workers state", zap.Error(err))
+			return nil
 		}
+
 		ps[i] = st
 	}
 
