@@ -5,6 +5,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/emersion/go-smtp"
 	"github.com/roadrunner-server/errors"
 	"github.com/roadrunner-server/pool/payload"
 	"github.com/roadrunner-server/pool/pool"
@@ -113,7 +114,7 @@ func (p *Plugin) Init(log Logger, cfg Configurer, server Server) error {
 func (p *Plugin) Serve() chan error {
 	errCh := make(chan error, 1)
 
-	// 1. СНАЧАЛА создаём и настраиваем SMTP server (но не запускаем)
+	// 1. Create worker pool (same pattern as TCP plugin)
 	backend := NewBackend(p)
 
 	p.smtpServer = smtp.NewServer(backend)
