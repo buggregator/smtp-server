@@ -136,14 +136,36 @@ func (p *Plugin) Serve() chan error {
 	defer p.mu.Unlock()
 
 	p.log.Debug("SMTP creating worker pool", zap.Any("pool_config", p.cfg.Pool))
+
+	// Use timeout context to detect hanging worker pool creation
+	poolCtx, poolCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer poolCancel()
+
 	var err error
-	p.wPool, err = p.server.NewPool(context.Background(), p.cfg.Pool, map[string]string{RrMode: PluginName}, p.log)
-	if err != nil {
-		p.log.Error("SMTP failed to create worker pool", zap.Error(err))
-		errCh <- err
-		return errCh
+	poolDone := make(chan struct{})
+	go func() {
+		p.wPool, err = p.server.NewPool(poolCtx, p.cfg.Pool, map[string]string{RrMode: PluginName}, p.log)
+		close(poolDone)
+	}()
+
+	select {
+	case <-poolDone:
+		if err != nil {
+			p.log.Error("SMTP failed to create worker pool", zap.Error(err))
+			errCh <- err
+			return errCh
+		}
+		p.log.Debug("SMTP worker pool created successfully")
+	case <-time.After(10 * time.Second):
+		p.log.Warn("SMTP worker pool creation taking longer than 10s - check PHP worker script")
+		<-poolDone
+		if err != nil {
+			p.log.Error("SMTP failed to create worker pool", zap.Error(err))
+			errCh <- err
+			return errCh
+		}
+		p.log.Debug("SMTP worker pool created successfully after delay")
 	}
-	p.log.Debug("SMTP worker pool created successfully")
 
 	p.log.Info("SMTP plugin worker pool created",
 		zap.Int("num_workers", len(p.wPool.Workers())),
