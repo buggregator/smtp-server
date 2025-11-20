@@ -107,6 +107,17 @@ func (p *Plugin) Init(log Logger, cfg Configurer, server Server) error {
 		zap.Int64("max_message_size", p.cfg.MaxMessageSize),
 	)
 
+	// Debug: log pool configuration
+	if p.cfg.Pool != nil {
+		p.log.Debug("SMTP pool configuration",
+			zap.Int("num_workers", int(p.cfg.Pool.NumWorkers)),
+			zap.Duration("allocate_timeout", p.cfg.Pool.AllocateTimeout),
+			zap.Duration("destroy_timeout", p.cfg.Pool.DestroyTimeout),
+		)
+	} else {
+		p.log.Warn("SMTP pool configuration is nil")
+	}
+
 	return nil
 }
 
@@ -117,10 +128,15 @@ func (p *Plugin) Serve() chan error {
 	p.mu.Lock()
 
 	// 1. Create worker pool
+	p.log.Debug("creating worker pool",
+		zap.Any("pool_config", p.cfg.Pool),
+	)
+
 	var err error
 	p.wPool, err = p.server.NewPool(context.Background(), p.cfg.Pool, map[string]string{RrMode: PluginName}, nil)
 	if err != nil {
 		p.mu.Unlock()
+		p.log.Error("failed to create worker pool", zap.Error(err))
 		errCh <- err
 		return errCh
 	}
