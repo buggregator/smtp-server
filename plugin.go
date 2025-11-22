@@ -28,9 +28,6 @@ type Configurer interface {
 	Has(name string) bool
 }
 
-// Note: Pusher interface is defined in jobs_rpc.go
-// We need to match what Jobs plugin actually provides
-
 // Plugin is the SMTP server plugin
 type Plugin struct {
 	mu          sync.RWMutex
@@ -39,7 +36,7 @@ type Plugin struct {
 	connections sync.Map // uuid -> *Session
 
 	// Jobs plugin reference
-	jobsPlugin Pusher
+	jobs Jobs
 
 	// SMTP server components
 	smtpServer *smtp.Server
@@ -87,7 +84,7 @@ func (p *Plugin) Serve() chan error {
 	defer p.mu.Unlock()
 
 	// Check if jobs plugin was collected
-	if p.jobsPlugin == nil {
+	if p.jobs == nil {
 		errCh <- errors.E(errors.Op("smtp_serve"), errors.Str("jobs plugin not available - ensure jobs plugin is enabled and loaded"))
 		return errCh
 	}
@@ -183,11 +180,10 @@ func (p *Plugin) Name() string {
 func (p *Plugin) Collects() []*dep.In {
 	return []*dep.In{
 		dep.Fits(func(pp any) {
-			// Collect any plugin that implements Pusher interface
-			pusher := pp.(Pusher)
-			p.jobsPlugin = pusher
-			p.log.Debug("collected pusher plugin")
-		}, (*Pusher)(nil)),
+			// Collect Jobs plugin that implements Push method
+			p.jobs = pp.(Jobs)
+			p.log.Debug("collected jobs plugin")
+		}, (*Jobs)(nil)),
 	}
 }
 
@@ -200,13 +196,15 @@ func (p *Plugin) RPC() any {
 func (p *Plugin) pushToJobs(email *EmailData) error {
 	const op = errors.Op("smtp_push_to_jobs")
 
-	if p.jobsPlugin == nil {
+	if p.jobs == nil {
 		return errors.E(op, errors.Str("jobs plugin not available - ensure jobs plugin is enabled and loaded before smtp plugin"))
 	}
 
-	job := ToJob(email, &p.cfg.Jobs)
+	// Convert to domain model
+	msg := emailToJobMessage(email, &p.cfg.Jobs)
 
-	err := p.jobsPlugin.Push(context.Background(), job)
+	// Push directly to Jobs plugin
+	err := p.jobs.Push(context.Background(), msg)
 	if err != nil {
 		return errors.E(op, err)
 	}
