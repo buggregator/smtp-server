@@ -28,12 +28,8 @@ type Configurer interface {
 	Has(name string) bool
 }
 
-// Pusher interface matches Jobs plugin's Push capability
-// Jobs plugin implements this through its Push method
-type Pusher interface {
-	Push(ctx context.Context, job any) error
-	Name() string
-}
+// Note: Pusher interface is defined in jobs_rpc.go
+// We need to match what Jobs plugin actually provides
 
 // Plugin is the SMTP server plugin
 type Plugin struct {
@@ -91,10 +87,10 @@ func (p *Plugin) Serve() chan error {
 	defer p.mu.Unlock()
 
 	// Check if jobs plugin was collected
-	//if p.jobsPlugin == nil {
-	//	errCh <- errors.E(errors.Op("smtp_serve"), errors.Str("jobs plugin not available - ensure jobs plugin is enabled and loaded"))
-	//	return errCh
-	//}
+	if p.jobsPlugin == nil {
+		errCh <- errors.E(errors.Op("smtp_serve"), errors.Str("jobs plugin not available - ensure jobs plugin is enabled and loaded"))
+		return errCh
+	}
 
 	// 1. Create SMTP backend
 	backend := NewBackend(p)
@@ -187,16 +183,10 @@ func (p *Plugin) Name() string {
 func (p *Plugin) Collects() []*dep.In {
 	return []*dep.In{
 		dep.Fits(func(pp any) {
-			// Check if plugin implements Pusher interface
-			pusher, ok := pp.(Pusher)
-			if !ok {
-				return
-			}
-			// Only collect the "jobs" plugin
-			if pusher.Name() == "jobs" {
-				p.jobsPlugin = pusher
-				p.log.Debug("collected jobs plugin", zap.String("plugin", pusher.Name()))
-			}
+			// Collect any plugin that implements Pusher interface
+			pusher := pp.(Pusher)
+			p.jobsPlugin = pusher
+			p.log.Debug("collected pusher plugin")
 		}, (*Pusher)(nil)),
 	}
 }

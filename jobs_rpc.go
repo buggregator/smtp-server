@@ -9,7 +9,7 @@ import (
 )
 
 // Pusher interface for Jobs plugin integration
-// Jobs plugin должен реализовать этот интерфейс
+// Jobs plugin must implement this interface to be collected by SMTP plugin
 type Pusher interface {
 	Push(ctx context.Context, job *jobsProto.Job) error
 }
