@@ -115,17 +115,22 @@ func (s *Session) Data(r io.Reader) error {
 		RemoteAddr: s.remoteAddr,
 		ReceivedAt: time.Now(),
 		Envelope: EnvelopeData{
-			From: s.from,
-			To:   s.to,
-			Helo: s.heloName,
+			From:          parsedMessage.Sender,
+			To:            parsedMessage.Recipients,
+			Ccs:           parsedMessage.CCs,
+			ReplyTo:       parsedMessage.ReplyTo,
+			AllRecipients: parsedMessage.AllRecipients,
+			Helo:          s.heloName,
 		},
 		Auth: authData,
 		Message: MessageData{
+			Id: parsedMessage.ID,
 			Headers: map[string][]string{
 				"Subject": {parsedMessage.Subject},
 			},
-			Body: parsedMessage.TextBody,
-			Raw:  parsedMessage.Raw,
+			Body:     parsedMessage.TextBody,
+			HTMLBody: parsedMessage.HTMLBody,
+			Raw:      parsedMessage.Raw,
 		},
 		Attachments: attachments,
 	}
