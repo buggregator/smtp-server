@@ -1,6 +1,7 @@
 package smtp
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -9,25 +10,21 @@ import (
 	"go.uber.org/zap"
 )
 
-// mockJobsRPC implements JobsRPCer for testing
-type mockJobsRPC struct {
-	pushed []*jobsProto.PushRequest
+// mockPusher implements Pusher for testing
+type mockPusher struct {
+	pushed []*jobsProto.Job
 	err    error
 }
 
-func (m *mockJobsRPC) Push(req *jobsProto.PushRequest, _ *jobsProto.Empty) error {
+func (m *mockPusher) Push(_ context.Context, job *jobsProto.Job) error {
 	if m.err != nil {
 		return m.err
 	}
-	m.pushed = append(m.pushed, req)
+	m.pushed = append(m.pushed, job)
 	return nil
 }
 
-func (m *mockJobsRPC) PushBatch(req *jobsProto.PushBatchRequest, _ *jobsProto.Empty) error {
-	return nil
-}
-
-func TestToJobsRequest(t *testing.T) {
+func TestToJob(t *testing.T) {
 	email := &EmailData{
 		Event:      "EMAIL_RECEIVED",
 		UUID:       "test-uuid-123",
@@ -53,40 +50,40 @@ func TestToJobsRequest(t *testing.T) {
 		AutoAck:  false,
 	}
 
-	req := ToJobsRequest(email, cfg)
+	job := ToJob(email, cfg)
 
-	if req.Job == nil {
+	if job == nil {
 		t.Fatal("expected job to be non-nil")
 	}
 
-	if req.Job.Job != "smtp.email" {
-		t.Errorf("expected job name 'smtp.email', got '%s'", req.Job.Job)
+	if job.Job != "smtp.email" {
+		t.Errorf("expected job name 'smtp.email', got '%s'", job.Job)
 	}
 
-	if req.Job.Options.Pipeline != "smtp-emails" {
-		t.Errorf("expected pipeline 'smtp-emails', got '%s'", req.Job.Options.Pipeline)
+	if job.Options.Pipeline != "smtp-emails" {
+		t.Errorf("expected pipeline 'smtp-emails', got '%s'", job.Options.Pipeline)
 	}
 
-	if req.Job.Options.Priority != 10 {
-		t.Errorf("expected priority 10, got %d", req.Job.Options.Priority)
+	if job.Options.Priority != 10 {
+		t.Errorf("expected priority 10, got %d", job.Options.Priority)
 	}
 
-	if len(req.Job.Payload) == 0 {
+	if len(job.Payload) == 0 {
 		t.Error("expected non-empty payload")
 	}
 
 	// Check headers
-	if uuidHeader, ok := req.Job.Headers["uuid"]; !ok || len(uuidHeader.Value) == 0 || uuidHeader.Value[0] != "test-uuid-123" {
+	if uuidHeader, ok := job.Headers["uuid"]; !ok || len(uuidHeader.Value) == 0 || uuidHeader.Value[0] != "test-uuid-123" {
 		t.Error("expected uuid header with value 'test-uuid-123'")
 	}
 }
 
 func TestPushToJobs(t *testing.T) {
-	mock := &mockJobsRPC{}
+	mock := &mockPusher{}
 	logger, _ := zap.NewDevelopment()
 	plugin := &Plugin{
-		jobsRPC: mock,
-		log:     logger,
+		pusher: mock,
+		log:    logger,
 		cfg: &Config{
 			Jobs: JobsConfig{
 				Pipeline: "test-pipeline",
@@ -115,11 +112,11 @@ func TestPushToJobs(t *testing.T) {
 }
 
 func TestPushToJobsError(t *testing.T) {
-	mock := &mockJobsRPC{err: errors.Str("rpc error")}
+	mock := &mockPusher{err: errors.Str("push error")}
 	logger, _ := zap.NewDevelopment()
 	plugin := &Plugin{
-		jobsRPC: mock,
-		log:     logger,
+		pusher: mock,
+		log:    logger,
 		cfg: &Config{
 			Jobs: JobsConfig{
 				Pipeline: "test-pipeline",
@@ -138,9 +135,9 @@ func TestPushToJobsError(t *testing.T) {
 	}
 }
 
-func TestPushToJobsNoRPC(t *testing.T) {
+func TestPushToJobsNoPusher(t *testing.T) {
 	plugin := &Plugin{
-		jobsRPC: nil,
+		pusher: nil,
 		cfg: &Config{
 			Jobs: JobsConfig{
 				Pipeline: "test-pipeline",
@@ -154,7 +151,7 @@ func TestPushToJobsNoRPC(t *testing.T) {
 
 	err := plugin.pushToJobs(email)
 	if err == nil {
-		t.Error("expected error when jobsRPC is nil")
+		t.Error("expected error when pusher is nil")
 	}
 }
 

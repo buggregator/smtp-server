@@ -6,7 +6,6 @@ import (
 	"sync"
 
 	"github.com/emersion/go-smtp"
-	jobsProto "github.com/roadrunner-server/api/v4/build/jobs/v1"
 	"github.com/roadrunner-server/endure/v2/dep"
 	"github.com/roadrunner-server/errors"
 	"go.uber.org/zap"
@@ -36,8 +35,8 @@ type Plugin struct {
 	log         *zap.Logger
 	connections sync.Map // uuid -> *Session
 
-	// Jobs RPC client
-	jobsRPC JobsRPCer
+	// Jobs pusher
+	pusher Pusher
 
 	// SMTP server components
 	smtpServer *smtp.Server
@@ -175,9 +174,9 @@ func (p *Plugin) Name() string {
 func (p *Plugin) Collects() []*dep.In {
 	return []*dep.In{
 		dep.Fits(func(pp any) {
-			jobsRPC := pp.(JobsRPCer)
-			p.jobsRPC = jobsRPC
-		}, (*JobsRPCer)(nil)),
+			pusher := pp.(Pusher)
+			p.pusher = pusher
+		}, (*Pusher)(nil)),
 	}
 }
 
@@ -190,14 +189,13 @@ func (p *Plugin) RPC() any {
 func (p *Plugin) pushToJobs(email *EmailData) error {
 	const op = errors.Op("smtp_push_to_jobs")
 
-	if p.jobsRPC == nil {
-		return errors.E(op, errors.Str("jobs RPC not available"))
+	if p.pusher == nil {
+		return errors.E(op, errors.Str("jobs pusher not available"))
 	}
 
-	req := ToJobsRequest(email, &p.cfg.Jobs)
+	job := ToJob(email, &p.cfg.Jobs)
 
-	var empty jobsProto.Empty
-	err := p.jobsRPC.Push(req, &empty)
+	err := p.pusher.Push(context.Background(), job)
 	if err != nil {
 		return errors.E(op, err)
 	}
