@@ -28,6 +28,13 @@ type Configurer interface {
 	Has(name string) bool
 }
 
+// Pusher interface matches Jobs plugin's Push capability
+// Jobs plugin implements this through its Push method
+type Pusher interface {
+	Push(ctx context.Context, job any) error
+	Name() string
+}
+
 // Plugin is the SMTP server plugin
 type Plugin struct {
 	mu          sync.RWMutex
@@ -35,8 +42,8 @@ type Plugin struct {
 	log         *zap.Logger
 	connections sync.Map // uuid -> *Session
 
-	// Jobs pusher
-	pusher Pusher
+	// Jobs plugin reference
+	jobsPlugin Pusher
 
 	// SMTP server components
 	smtpServer *smtp.Server
@@ -82,6 +89,12 @@ func (p *Plugin) Serve() chan error {
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// Check if jobs plugin was collected
+	//if p.jobsPlugin == nil {
+	//	errCh <- errors.E(errors.Op("smtp_serve"), errors.Str("jobs plugin not available - ensure jobs plugin is enabled and loaded"))
+	//	return errCh
+	//}
 
 	// 1. Create SMTP backend
 	backend := NewBackend(p)
@@ -174,8 +187,16 @@ func (p *Plugin) Name() string {
 func (p *Plugin) Collects() []*dep.In {
 	return []*dep.In{
 		dep.Fits(func(pp any) {
-			pusher := pp.(Pusher)
-			p.pusher = pusher
+			// Check if plugin implements Pusher interface
+			pusher, ok := pp.(Pusher)
+			if !ok {
+				return
+			}
+			// Only collect the "jobs" plugin
+			if pusher.Name() == "jobs" {
+				p.jobsPlugin = pusher
+				p.log.Debug("collected jobs plugin", zap.String("plugin", pusher.Name()))
+			}
 		}, (*Pusher)(nil)),
 	}
 }
@@ -189,13 +210,13 @@ func (p *Plugin) RPC() any {
 func (p *Plugin) pushToJobs(email *EmailData) error {
 	const op = errors.Op("smtp_push_to_jobs")
 
-	if p.pusher == nil {
-		return errors.E(op, errors.Str("jobs pusher not available"))
+	if p.jobsPlugin == nil {
+		return errors.E(op, errors.Str("jobs plugin not available - ensure jobs plugin is enabled and loaded before smtp plugin"))
 	}
 
 	job := ToJob(email, &p.cfg.Jobs)
 
-	err := p.pusher.Push(context.Background(), job)
+	err := p.jobsPlugin.Push(context.Background(), job)
 	if err != nil {
 		return errors.E(op, err)
 	}
