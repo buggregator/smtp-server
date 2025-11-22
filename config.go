@@ -4,7 +4,6 @@ import (
 	"time"
 
 	"github.com/roadrunner-server/errors"
-	"github.com/roadrunner-server/pool/pool"
 )
 
 // Config represents SMTP server configuration
@@ -19,11 +18,19 @@ type Config struct {
 	// Attachment storage
 	AttachmentStorage AttachmentConfig `mapstructure:"attachment_storage"`
 
-	// Worker pool configuration
-	Pool *pool.Config `mapstructure:"pool"`
+	// Jobs integration (replaces worker pool)
+	Jobs JobsConfig `mapstructure:"jobs"`
 
 	// Include full raw RFC822 message in JSON (default: false)
 	IncludeRaw bool `mapstructure:"include_raw"`
+}
+
+// JobsConfig configures Jobs plugin integration
+type JobsConfig struct {
+	Pipeline string `mapstructure:"pipeline"` // Target pipeline in Jobs
+	Priority int64  `mapstructure:"priority"` // Default priority for jobs
+	Delay    int64  `mapstructure:"delay"`    // Default delay (0 = immediate)
+	AutoAck  bool   `mapstructure:"auto_ack"` // Auto-acknowledge jobs
 }
 
 // AttachmentConfig configures how attachments are stored
@@ -68,11 +75,10 @@ func (c *Config) InitDefaults() error {
 		c.AttachmentStorage.CleanupAfter = 1 * time.Hour
 	}
 
-	// Pool defaults
-	if c.Pool == nil {
-		c.Pool = &pool.Config{}
+	// Jobs defaults
+	if c.Jobs.Priority == 0 {
+		c.Jobs.Priority = 10
 	}
-	c.Pool.InitDefaults()
 
 	return c.validate()
 }
@@ -91,6 +97,10 @@ func (c *Config) validate() error {
 
 	if c.AttachmentStorage.Mode != "memory" && c.AttachmentStorage.Mode != "tempfile" {
 		return errors.E(op, errors.Str("attachment_storage.mode must be 'memory' or 'tempfile'"))
+	}
+
+	if c.Jobs.Pipeline == "" {
+		return errors.E(op, errors.Str("jobs.pipeline is required"))
 	}
 
 	return nil

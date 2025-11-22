@@ -6,44 +6,19 @@ import (
 	"sync"
 
 	"github.com/emersion/go-smtp"
+	jobsProto "github.com/roadrunner-server/api/v4/build/jobs/v1"
+	"github.com/roadrunner-server/endure/v2/dep"
 	"github.com/roadrunner-server/errors"
-	"github.com/roadrunner-server/pool/payload"
-	"github.com/roadrunner-server/pool/pool"
-	staticPool "github.com/roadrunner-server/pool/pool/static_pool"
-	"github.com/roadrunner-server/pool/state/process"
-	"github.com/roadrunner-server/pool/worker"
 	"go.uber.org/zap"
 )
 
 const (
 	PluginName = "smtp"
-	RrMode     = "RR_MODE"
 )
-
-// Pool interface for worker pool operations
-type Pool interface {
-	// Workers returns worker list associated with the pool
-	Workers() (workers []*worker.Process)
-	// RemoveWorker removes worker from the pool
-	RemoveWorker(ctx context.Context) error
-	// AddWorker adds worker to the pool
-	AddWorker() error
-	// Exec executes payload
-	Exec(ctx context.Context, p *payload.Payload, stopCh chan struct{}) (chan *staticPool.PExec, error)
-	// Reset kills all workers and replaces with new
-	Reset(ctx context.Context) error
-	// Destroy all underlying stacks
-	Destroy(ctx context.Context)
-}
 
 // Logger interface for dependency injection
 type Logger interface {
 	NamedLogger(name string) *zap.Logger
-}
-
-// Server creates workers for the application
-type Server interface {
-	NewPool(ctx context.Context, cfg *pool.Config, env map[string]string, _ *zap.Logger) (*staticPool.Pool, error)
 }
 
 // Configurer interface for configuration access
@@ -56,14 +31,13 @@ type Configurer interface {
 
 // Plugin is the SMTP server plugin
 type Plugin struct {
-	mu     sync.RWMutex
-	cfg    *Config
-	log    *zap.Logger
-	server Server
-
-	wPool       Pool
+	mu          sync.RWMutex
+	cfg         *Config
+	log         *zap.Logger
 	connections sync.Map // uuid -> *Session
-	pldPool     sync.Pool
+
+	// Jobs RPC client
+	jobsRPC JobsRPCer
 
 	// SMTP server components
 	smtpServer *smtp.Server
@@ -71,7 +45,7 @@ type Plugin struct {
 }
 
 // Init initializes the plugin with configuration and logger
-func (p *Plugin) Init(log Logger, cfg Configurer, server Server) error {
+func (p *Plugin) Init(log Logger, cfg Configurer) error {
 	const op = errors.Op("smtp_plugin_init")
 
 	// Check if plugin is enabled
@@ -90,21 +64,14 @@ func (p *Plugin) Init(log Logger, cfg Configurer, server Server) error {
 		return errors.E(op, err)
 	}
 
-	// Initialize payload pool
-	p.pldPool = sync.Pool{
-		New: func() any {
-			return new(payload.Payload)
-		},
-	}
-
 	// Setup logger
 	p.log = log.NamedLogger(PluginName)
-	p.server = server
 
 	p.log.Info("SMTP plugin initialized",
 		zap.String("addr", p.cfg.Addr),
 		zap.String("hostname", p.cfg.Hostname),
 		zap.Int64("max_message_size", p.cfg.MaxMessageSize),
+		zap.String("jobs_pipeline", p.cfg.Jobs.Pipeline),
 	)
 
 	return nil
@@ -112,26 +79,22 @@ func (p *Plugin) Init(log Logger, cfg Configurer, server Server) error {
 
 // Serve starts the SMTP server
 func (p *Plugin) Serve() chan error {
+	const op = errors.Op("smtp_serve")
 	errCh := make(chan error, 2)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	var err error
-	p.wPool, err = p.server.NewPool(context.Background(), p.cfg.Pool, map[string]string{RrMode: PluginName}, p.log)
-	if err != nil {
-		errCh <- err
+	// Verify Jobs RPC is available
+	if p.jobsRPC == nil {
+		errCh <- errors.E(op, errors.Str("jobs plugin not available, check that jobs plugin is enabled"))
 		return errCh
 	}
 
-	p.log.Info("SMTP plugin worker pool created",
-		zap.Int("num_workers", len(p.wPool.Workers())),
-	)
-
-	// 2. Create SMTP backend
+	// 1. Create SMTP backend
 	backend := NewBackend(p)
 
-	// 3. Create SMTP server
+	// 2. Create SMTP server
 	p.smtpServer = smtp.NewServer(backend)
 	p.smtpServer.Addr = p.cfg.Addr
 	p.smtpServer.Domain = p.cfg.Hostname
@@ -144,9 +107,11 @@ func (p *Plugin) Serve() chan error {
 	p.log.Info("SMTP server configured",
 		zap.String("addr", p.smtpServer.Addr),
 		zap.String("domain", p.smtpServer.Domain),
+		zap.String("jobs_pipeline", p.cfg.Jobs.Pipeline),
 	)
 
-	// 4. Create listener
+	// 3. Create listener
+	var err error
 	p.listener, err = net.Listen("tcp", p.cfg.Addr)
 	if err != nil {
 		errCh <- errors.E(errors.Op("smtp_listen"), err)
@@ -155,7 +120,7 @@ func (p *Plugin) Serve() chan error {
 
 	p.log.Info("SMTP listener created", zap.String("addr", p.cfg.Addr))
 
-	// 5. Start SMTP server in goroutine
+	// 4. Start SMTP server in goroutine
 	go func() {
 		p.log.Info("SMTP server starting", zap.String("addr", p.cfg.Addr))
 		if err := p.smtpServer.Serve(p.listener); err != nil {
@@ -164,7 +129,7 @@ func (p *Plugin) Serve() chan error {
 		}
 	}()
 
-	// 6. Start temp file cleanup routine
+	// 5. Start temp file cleanup routine
 	p.startCleanupRoutine(context.Background())
 
 	return errCh
@@ -196,17 +161,6 @@ func (p *Plugin) Stop(ctx context.Context) error {
 			return true
 		})
 
-		if p.wPool != nil {
-			switch pp := p.wPool.(type) {
-			case *staticPool.Pool:
-				if pp != nil {
-					pp.Destroy(ctx)
-				}
-			default:
-				// pool is nil, nothing to do
-			}
-		}
-
 		doneCh <- struct{}{}
 	}()
 
@@ -219,55 +173,46 @@ func (p *Plugin) Stop(ctx context.Context) error {
 	}
 }
 
-// Reset resets the worker pool
+// Name returns plugin name for RoadRunner
+func (p *Plugin) Name() string {
+	return PluginName
+}
 
-// Reset destroys the old pool and replaces it with new one, waiting for old pool to die
-func (p *Plugin) Reset() error {
-	const op = errors.Op("http_plugin_reset")
+// Collects declares dependencies on other plugins
+func (p *Plugin) Collects() []*dep.In {
+	return []*dep.In{
+		dep.Fits(func(pp any) {
+			jobsRPC := pp.(JobsRPCer)
+			p.jobsRPC = jobsRPC
+		}, (*JobsRPCer)(nil)),
+	}
+}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// RPC returns RPC interface for external management
+func (p *Plugin) RPC() any {
+	return &rpc{p: p}
+}
 
-	p.log.Info("reset signal was received")
+// pushToJobs sends email as job to Jobs plugin
+func (p *Plugin) pushToJobs(email *EmailData) error {
+	const op = errors.Op("smtp_push_to_jobs")
 
-	if p.wPool == nil {
-		p.log.Info("pool is nil, nothing to reset")
-		return nil
+	if p.jobsRPC == nil {
+		return errors.E(op, errors.Str("jobs RPC not available"))
 	}
 
-	err := p.wPool.Reset(context.Background())
+	req := ToJobsRequest(email, &p.cfg.Jobs)
+
+	var empty jobsProto.Empty
+	err := p.jobsRPC.Push(req, &empty)
 	if err != nil {
 		return errors.E(op, err)
 	}
 
-	p.log.Info("plugin was successfully reset")
+	p.log.Debug("email pushed to jobs",
+		zap.String("uuid", email.UUID),
+		zap.String("pipeline", p.cfg.Jobs.Pipeline),
+	)
+
 	return nil
-}
-
-// Workers returns slice with the process states for the workers
-func (p *Plugin) Workers() []*process.State {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
-	if p.wPool == nil {
-		return nil
-	}
-
-	workers := p.wPool.Workers()
-
-	ps := make([]*process.State, 0, len(workers))
-	for i := range workers {
-		state, err := process.WorkerProcessState(workers[i])
-		if err != nil {
-			return nil
-		}
-		ps = append(ps, state)
-	}
-
-	return ps
-}
-
-// Name returns plugin name for RoadRunner
-func (p *Plugin) Name() string {
-	return PluginName
 }

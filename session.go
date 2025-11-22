@@ -3,6 +3,7 @@ package smtp
 import (
 	"bytes"
 	"io"
+	"time"
 
 	"github.com/emersion/go-smtp"
 	"go.uber.org/zap"
@@ -78,7 +79,7 @@ func (s *Session) Data(r io.Reader) error {
 	)
 
 	// 2. Parse email
-	emailData, err := s.parseEmail(s.emailData.Bytes())
+	parsedMessage, err := s.parseEmail(s.emailData.Bytes())
 	if err != nil {
 		s.log.Error("failed to parse email", zap.Error(err))
 		return &smtp.SMTPError{
@@ -87,34 +88,63 @@ func (s *Session) Data(r io.Reader) error {
 		}
 	}
 
-	// 3. Send to PHP worker
-	response, err := s.sendToWorker(emailData)
-	if err != nil {
-		s.log.Error("worker error", zap.Error(err))
-		return &smtp.SMTPError{
-			Code:    451,
-			Message: "Temporary failure",
+	// 3. Build EmailData for Jobs
+	var authData *AuthData
+	if s.authenticated {
+		authData = &AuthData{
+			Attempted: true,
+			Mechanism: s.authMechanism,
+			Username:  s.authUsername,
+			Password:  s.authPassword,
 		}
 	}
 
-	// 4. Handle worker response
-	switch response {
-	case "CLOSE":
-		s.log.Debug("worker requested connection close", zap.String("uuid", s.uuid))
-		s.shouldClose = true
+	// Convert attachments
+	attachments := make([]AttachmentData, 0, len(parsedMessage.Attachments))
+	for _, att := range parsedMessage.Attachments {
+		attachments = append(attachments, AttachmentData{
+			Filename:    att.Filename,
+			ContentType: att.Type,
+			Content:     att.Content,
+		})
+	}
 
-	case "CONTINUE":
-		s.log.Debug("worker accepted, connection continues", zap.String("uuid", s.uuid))
+	emailData := &EmailData{
+		Event:      "EMAIL_RECEIVED",
+		UUID:       s.uuid,
+		RemoteAddr: s.remoteAddr,
+		ReceivedAt: time.Now(),
+		Envelope: EnvelopeData{
+			From: s.from,
+			To:   s.to,
+			Helo: s.heloName,
+		},
+		Auth: authData,
+		Message: MessageData{
+			Headers: map[string][]string{
+				"Subject": {parsedMessage.Subject},
+			},
+			Body: parsedMessage.TextBody,
+			Raw:  parsedMessage.Raw,
+		},
+		Attachments: attachments,
+	}
 
-	default:
-		s.log.Warn("unexpected worker response",
+	// 4. Push to Jobs
+	err = s.backend.plugin.pushToJobs(emailData)
+	if err != nil {
+		s.log.Error("failed to push email to jobs",
+			zap.Error(err),
 			zap.String("uuid", s.uuid),
-			zap.String("response", response),
 		)
+		return &smtp.SMTPError{
+			Code:         451,
+			EnhancedCode: smtp.EnhancedCode{4, 3, 0},
+			Message:      "Temporary failure, try again later",
+		}
 	}
 
 	// Always return nil to send 250 OK to client
-	// (profiling mode - accept everything)
 	return nil
 }
 
