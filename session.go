@@ -5,6 +5,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/emersion/go-smtp"
 	"go.uber.org/zap"
 )
 
