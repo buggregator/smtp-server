@@ -124,8 +124,6 @@ func emailToJobMessage(email *EmailData, cfg *JobsConfig) jobs.Message {
 		Pld:   payload,
 		Hdr: map[string][]string{
 			"uuid":          {email.UUID},
-			"remote_addr":   {email.RemoteAddr},
-			"from":          {email.Envelope.From},
 			"payload_class": {"smtp:handler"},
 		},
 		Options: &JobOptions{
