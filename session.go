@@ -5,7 +5,6 @@ import (
 	"io"
 	"time"
 
-	"github.com/emersion/go-smtp"
 	"go.uber.org/zap"
 )
 
@@ -131,6 +130,7 @@ func (s *Session) Data(r io.Reader) error {
 			Body:     parsedMessage.TextBody,
 			HTMLBody: parsedMessage.HTMLBody,
 			Raw:      parsedMessage.Raw,
+			Subject:  parsedMessage.Subject,
 		},
 		Attachments: attachments,
 	}
