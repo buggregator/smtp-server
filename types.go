@@ -16,9 +16,12 @@ type EmailData struct {
 
 // EnvelopeData represents SMTP envelope information
 type EnvelopeData struct {
-	From string   `json:"from"` // MAIL FROM
-	To   []string `json:"to"`   // RCPT TO
-	Helo string   `json:"helo"` // HELO/EHLO domain
+	From          []EmailAddress `json:"from"` // MAIL FROM
+	To            []EmailAddress `json:"to"`   // RCPT TO
+	Ccs           []EmailAddress `json:"ccs"`
+	ReplyTo       []EmailAddress `json:"replyTo"`
+	AllRecipients []string       `json:"allRecipients"`
+	Helo          string         `json:"helo"` // HELO/EHLO domain
 }
 
 // AuthData represents authentication attempt data
@@ -31,9 +34,12 @@ type AuthData struct {
 
 // MessageData represents parsed email message
 type MessageData struct {
-	Headers map[string][]string `json:"headers"`       // Parsed headers
-	Body    string              `json:"body"`          // Plain text or HTML body
-	Raw     string              `json:"raw,omitempty"` // Full RFC822 (optional)
+	Headers  map[string][]string `json:"headers"` // Parsed headers
+	Id       *string             `json:"id"`
+	Body     string              `json:"body"` // Plain text or HTML body
+	HTMLBody string              `json:"html_body,omitempty"`
+	Raw      string              `json:"raw,omitempty"` // Full RFC822 (optional)
+	Subject  string              `json:"subject"`
 }
 
 // AttachmentData represents an email attachment
